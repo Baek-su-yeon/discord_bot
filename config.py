@@ -13,6 +13,10 @@ ATTENDANCE_CHANNEL_ID = int(os.getenv("ATTENDANCE_CHANNEL_ID", "0"))
 
 SUMMARY_POST_TITLE = os.getenv("SUMMARY_POST_TITLE", "📊 이번 달 집계")
 
+# 집계 게시물에 부여할 태그 이름 (선택). 태그가 필수인 포럼 채널에서만 필요.
+# 출근/퇴근/휴가/운동 4종과는 달라야 함.
+SUMMARY_POST_TAG = os.getenv("SUMMARY_POST_TAG") or None
+
 # 포럼 태그 이름 (4종, 정확히 일치해야 함)
 TAG_CHECK_IN = "출근"
 TAG_CHECK_OUT = "퇴근"

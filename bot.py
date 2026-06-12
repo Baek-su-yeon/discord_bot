@@ -12,6 +12,7 @@ from config import (
     DISCORD_TOKEN,
     RUN_HOUR,
     RUN_MINUTE,
+    SUMMARY_POST_TAG,
     SUMMARY_POST_TITLE,
     TIMEZONE,
 )
@@ -23,9 +24,24 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("attendance_bot")
 
 ATTENDANCE_TABLE_PATH = "attendance_table.png"
+# 포럼 스레드 최대 자동 보관 시간(분) = 7일. 집계 게시물이 자동 보관되지 않도록 최대값 사용.
+SUMMARY_POST_AUTO_ARCHIVE = 10080
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+
+_startup_done = False
+
+
+def _resolve_summary_tags(channel: discord.ForumChannel) -> list[discord.ForumTag]:
+    """SUMMARY_POST_TAG가 설정돼 있으면 channel.available_tags에서 일치하는 태그를 찾아 반환."""
+    if not SUMMARY_POST_TAG:
+        return []
+    for tag in channel.available_tags:
+        if tag.name == SUMMARY_POST_TAG:
+            return [tag]
+    logger.warning("SUMMARY_POST_TAG='%s' 태그를 채널에서 찾지 못했습니다. 태그 없이 생성합니다.", SUMMARY_POST_TAG)
+    return []
 
 
 async def get_or_create_summary_message(channel: discord.ForumChannel) -> discord.Message:
@@ -45,6 +61,8 @@ async def get_or_create_summary_message(channel: discord.ForumChannel) -> discor
     result = await channel.create_thread(
         name=SUMMARY_POST_TITLE,
         content="집계를 준비하고 있습니다...",
+        auto_archive_duration=SUMMARY_POST_AUTO_ARCHIVE,
+        applied_tags=_resolve_summary_tags(channel),
     )
     save_state({"thread_id": result.thread.id, "message_id": result.message.id})
     return result.message
@@ -67,6 +85,11 @@ async def run_aggregation() -> None:
     render_attendance_table(result, ATTENDANCE_TABLE_PATH)
 
     message = await get_or_create_summary_message(channel)
+
+    thread = message.channel
+    if getattr(thread, "archived", False):
+        await thread.edit(archived=False)
+
     await message.edit(
         content="",
         embed=embed,
@@ -78,14 +101,35 @@ async def run_aggregation() -> None:
 
 @tasks.loop(time=dt.time(hour=RUN_HOUR, minute=RUN_MINUTE, tzinfo=TIMEZONE))
 async def daily_aggregation() -> None:
-    await run_aggregation()
+    try:
+        await run_aggregation()
+    except Exception:
+        logger.exception("일일 집계 중 오류가 발생했습니다. 다음 스케줄에 재시도합니다.")
+
+
+@daily_aggregation.error
+async def daily_aggregation_error(error: BaseException) -> None:
+    logger.exception("daily_aggregation 루프에서 처리되지 않은 오류 발생", exc_info=error)
+    if not daily_aggregation.is_running():
+        daily_aggregation.restart()
 
 
 @client.event
 async def on_ready() -> None:
+    global _startup_done
     logger.info("로그인됨: %s", client.user)
-    # 시작 시 1회 즉시 집계(catch-up) -> 21:00을 놓친 날 보정
-    await run_aggregation()
+
+    if _startup_done:
+        logger.info("재접속 감지 — catch-up/스케줄 시작을 건너뜁니다.")
+        return
+    _startup_done = True
+
+    try:
+        # 시작 시 1회 즉시 집계(catch-up) -> 21:00을 놓친 날 보정
+        await run_aggregation()
+    except Exception:
+        logger.exception("시작 시 catch-up 집계 중 오류가 발생했습니다.")
+
     if not daily_aggregation.is_running():
         daily_aggregation.start()
 
