@@ -67,6 +67,7 @@ def build_embed(result: AggregateResult, today: date) -> discord.Embed:
         embed.add_field(name="이름별 누적 출퇴근 시간", value="아직 없음", inline=False)
         return embed
 
+    visible_users = sorted(visible_users, key=lambda u: result.study_minutes[u[0]], reverse=True)
     lines = [f"{name}: {_format_hours(result.study_minutes[uid])}" for uid, name in visible_users]
     chunks = _chunk_lines(lines)
     multi = len(chunks) > 1

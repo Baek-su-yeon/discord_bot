@@ -45,6 +45,30 @@ def test_build_embed_no_checkins_today():
     assert field.value == "아직 없음"
 
 
+def test_build_embed_cumulative_hours_sorted_descending():
+    raw = RawData(
+        checkin={
+            date(2026, 6, 1): {
+                1: ("alice", dt(2026, 6, 1, 9, 0)),
+                2: ("bob", dt(2026, 6, 1, 9, 0)),
+                3: ("carol", dt(2026, 6, 1, 9, 0)),
+            }
+        },
+        checkout={
+            date(2026, 6, 1): {
+                1: ("alice", dt(2026, 6, 1, 13, 0)),  # 4시간 -1시간 = 3시간
+                2: ("bob", dt(2026, 6, 1, 19, 0)),  # 10시간 -1시간 = 9시간
+                3: ("carol", dt(2026, 6, 1, 16, 0)),  # 7시간 -1시간 = 6시간
+            }
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+    embed = build_embed(result, date(2026, 6, 1))
+
+    field = next(f for f in embed.fields if f.name == "이름별 누적 출퇴근 시간")
+    assert field.value == "bob: 9시간\ncarol: 6시간\nalice: 3시간"
+
+
 def test_build_embed_does_not_show_awards():
     raw = RawData(
         checkin={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))}},
