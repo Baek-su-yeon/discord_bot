@@ -233,4 +233,7 @@ $RECYCLE.BIN/
 # file name
 state.json
 
+# folder
+docs/
+
 # End of https://www.toptal.com/developers/gitignore/api/windows,python,visualstudiocode,venv
