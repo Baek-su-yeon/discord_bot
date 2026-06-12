@@ -17,13 +17,12 @@ from config import (
     TIMEZONE,
 )
 from fetch import fetch_month_data
-from render import build_embed, render_attendance_table
+from render import build_embed
 from state import load_state, save_state
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("attendance_bot")
 
-ATTENDANCE_TABLE_PATH = "attendance_table.png"
 # 포럼 스레드 최대 자동 보관 시간(분) = 7일. 집계 게시물이 자동 보관되지 않도록 최대값 사용.
 SUMMARY_POST_AUTO_ARCHIVE = 10080
 
@@ -82,7 +81,6 @@ async def run_aggregation() -> None:
     result = aggregate(raw, today)
 
     embed = build_embed(result, today)
-    render_attendance_table(result, ATTENDANCE_TABLE_PATH)
 
     message = await get_or_create_summary_message(channel)
 
@@ -90,11 +88,7 @@ async def run_aggregation() -> None:
     if getattr(thread, "archived", False):
         await thread.edit(archived=False)
 
-    await message.edit(
-        content="",
-        embed=embed,
-        attachments=[discord.File(ATTENDANCE_TABLE_PATH)],
-    )
+    await message.edit(content="", embed=embed, attachments=[])
 
     logger.info("집계 완료")
 

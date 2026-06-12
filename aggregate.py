@@ -6,6 +6,9 @@ from datetime import date, datetime, time, timedelta
 # 가상 퇴근 시각 (KST) — 공부 시간 계산과 출석부 표시에만 사용
 VIRTUAL_CHECKOUT_TIME = time(21, 0)
 
+# 공부 시간 계산 시 하루마다 빼는 식사 시간
+LUNCH_BREAK_MINUTES = 60
+
 # 유저 한 명의 특정 게시물 내 최초 댓글 정보: (표시 이름, 댓글 시각 KST)
 UserEntry = tuple[str, datetime]
 
@@ -48,8 +51,9 @@ class AggregateResult:
     weekday_dates: list[date]  # Dw
     roster: dict[int, str]  # user_id -> display_name
     table: dict[int, dict[date, Cell]]  # user_id -> {date: Cell} (D 날짜만)
-    study_minutes: dict[int, int]  # user_id -> 총 공부 시간(분)
+    study_minutes: dict[int, int]  # user_id -> 총 공부 시간(분, 식사시간 차감)
     awards: dict[str, Award]
+    today_checkins: dict[int, UserEntry]  # user_id -> (display_name, 오늘 출근 댓글 시각)
 
 
 def aggregate(raw: RawData, today: date) -> AggregateResult:
@@ -116,10 +120,10 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
             checkout_time = checkout_entry[1] if checkout_entry else None
 
             if checkin_time and checkout_time:
-                delta = checkout_time - checkin_time
+                delta = checkout_time - checkin_time - timedelta(minutes=LUNCH_BREAK_MINUTES)
             elif checkin_time and not checkout_time:
                 virtual_end = datetime.combine(dt, VIRTUAL_CHECKOUT_TIME, tzinfo=checkin_time.tzinfo)
-                delta = virtual_end - checkin_time
+                delta = virtual_end - checkin_time - timedelta(minutes=LUNCH_BREAK_MINUTES)
             else:
                 delta = timedelta(0)
 
@@ -170,6 +174,9 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
         value=max_exercise,
     )
 
+    # 오늘 출근: 오늘 출근 게시물에 댓글을 단 유저
+    today_checkins: dict[int, UserEntry] = dict(raw.checkin.get(today, {}))
+
     return AggregateResult(
         dates=d,
         weekday_dates=dw,
@@ -177,4 +184,5 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
         table=table,
         study_minutes=study_minutes,
         awards=awards,
+        today_checkins=today_checkins,
     )

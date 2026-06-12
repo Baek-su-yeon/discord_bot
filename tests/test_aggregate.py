@@ -28,12 +28,16 @@ def test_basic_attendance_and_study_time():
     assert result.weekday_dates == [date(2026, 6, 1)]
     assert result.roster == {1: "alice"}
 
-    # 6/1: 09:00-18:00 = 540분, 6/2: 출근만 -> 가상 퇴근 21:00 = 720분
-    assert result.study_minutes[1] == 540 + 720
+    # 6/1: 09:00-18:00 = 540분 - 식사시간 60분 = 480분
+    # 6/2: 출근만 -> 가상 퇴근 21:00 = 720분 - 식사시간 60분 = 660분
+    assert result.study_minutes[1] == 480 + 660
 
     assert result.awards["perfect_attendance"].users == [1]
     assert result.awards["attendance_king"].users == [1]
     assert result.awards["attendance_king"].value == 1
+
+    # 오늘(6/2) 출근한 사람
+    assert result.today_checkins == {1: ("alice", dt(2026, 6, 2, 9, 0))}
 
 
 def test_weekend_excluded_from_attendance_king_but_perfect_needs_all_days():
@@ -98,3 +102,15 @@ def test_no_dates_yet_no_perfect_attendance():
     assert result.dates == []
     assert result.awards["perfect_attendance"].users == []
     assert result.awards["attendance_king"].users == []
+    assert result.today_checkins == {}
+
+
+def test_lunch_break_clamped_to_zero_for_short_day():
+    # 출근-퇴근이 1시간 이내면 식사시간을 빼고 0으로 클램프
+    raw = RawData(
+        checkin={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))}},
+        checkout={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 30))}},
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    assert result.study_minutes[1] == 0
