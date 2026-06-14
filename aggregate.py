@@ -38,6 +38,11 @@ class AttendanceLog:
 # 날짜 키 존재 = "그날 입퇴실 게시물이 있었다"는 뜻.
 AttendanceData = dict[date, dict[int, AttendanceLog]]
 
+# 음성 세션 한 개: (입장 datetime, 퇴장 datetime | None). None = 종료 이벤트 유실.
+VoiceSession = tuple[datetime, "datetime | None"]
+# 음성 세션 데이터: 날짜 -> {유저ID: [VoiceSession, ...]}
+VoiceData = dict[date, dict[int, list[VoiceSession]]]
+
 
 @dataclass
 class RawData:
@@ -102,7 +107,12 @@ def _pair_sessions(
 
 
 def _comment_study_minutes(events: list[AttendanceEvent], day: date) -> int:
-    """댓글 폴백 공부시간(분): 다중 세션 합산 - 식사 60분, 가상퇴실 18:00, 음수 0 클램프."""
+    """댓글 폴백 공부시간(분): 다중 세션 합산 - 식사 60분, 음수 0 클램프.
+
+    - 완성된 입실/퇴실 페어는 합산.
+    - 퇴실 댓글이 하나도 없으면(완성 페어 0) 가상 퇴실 18:00 으로 간주(패널티).
+    - 완성 페어가 있는데 마지막 입실이 짝(퇴실) 없이 끝나면 그 세션은 버림.
+    """
     pairs, dangling = _pair_sessions(events)
 
     total = timedelta()
@@ -110,8 +120,7 @@ def _comment_study_minutes(events: list[AttendanceEvent], day: date) -> int:
         if end > start:
             total += end - start
 
-    # 마지막 입실이 짝 없이 끝나면 가상 퇴실 18:00 으로 간주 (패널티)
-    if dangling is not None:
+    if dangling is not None and not pairs:
         virtual_end = datetime.combine(day, VIRTUAL_CHECKOUT_TIME, tzinfo=dangling.tzinfo)
         if virtual_end > dangling:
             total += virtual_end - dangling
@@ -120,6 +129,26 @@ def _comment_study_minutes(events: list[AttendanceEvent], day: date) -> int:
         return 0
 
     total -= timedelta(minutes=LUNCH_BREAK_MINUTES)
+    return max(0, int(total.total_seconds() // 60))
+
+
+def _voice_study_minutes(sessions: list["VoiceSession"], day: date) -> int:
+    """음성 체류 공부시간(분): 다중 세션 합산, 09:00~자정 클램프. 식사 차감 없음.
+
+    호출 측에서 종료 ts가 None(유실)인 세션이 없음을 보장한 뒤 호출한다.
+    """
+    if not sessions:
+        return 0
+    tz = sessions[0][0].tzinfo
+    day_start = datetime.combine(day, DAY_START_TIME, tzinfo=tz)
+    day_end = datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=tz)
+
+    total = timedelta()
+    for start, end in sessions:
+        s = max(start, day_start)
+        e = min(end, day_end)
+        if e > s:
+            total += e - s
     return max(0, int(total.total_seconds() // 60))
 
 
@@ -135,8 +164,12 @@ def _last_checkout(events: list[AttendanceEvent]) -> datetime | None:
     return max(checkouts) if checkouts else None
 
 
-def aggregate(raw: RawData, today: date) -> AggregateResult:
-    """이번 달 원자료를 받아 출석부/누적시간/수상 결과를 계산한다."""
+def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> AggregateResult:
+    """이번 달 원자료를 받아 출석부/누적시간/수상 결과를 계산한다.
+
+    공부시간은 음성 체류 우선, 음성이 없거나 유실(종료 None)이면 댓글 폴백.
+    """
+    voice = voice or {}
 
     # D = 입퇴실 게시물이 존재하는 날 (오늘까지)
     d = sorted(dt for dt in raw.attendance if dt <= today)
@@ -180,12 +213,21 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
             if cell.checkin is not None or cell.vacation:
                 table[uid][dt] = cell
 
-    # 공부 시간: 입퇴실 게시물이 있는 모든 날(오늘까지, 주말 포함) 댓글 폴백 합산
+    # 공부 시간: 입퇴실 게시물이 있는 모든 날(오늘까지, 주말 포함) 합산.
+    # 날짜·유저별로 음성 우선(유효하면), 아니면 댓글 폴백.
     study_minutes: dict[int, int] = {uid: 0 for uid in roster}
     for dt in d:
         entries = raw.attendance.get(dt, {})
-        for uid, log in entries.items():
-            study_minutes[uid] += _comment_study_minutes(log.events, dt)
+        day_voice = voice.get(dt, {})
+        for uid in roster:
+            v_sessions = day_voice.get(uid)
+            # 음성 세션이 있고, 종료 None(유실)이 하나도 없으면 음성 사용
+            if v_sessions and all(end is not None for _, end in v_sessions):
+                study_minutes[uid] += _voice_study_minutes(v_sessions, dt)
+            else:
+                log = entries.get(uid)
+                if log is not None:
+                    study_minutes[uid] += _comment_study_minutes(log.events, dt)
 
     awards: dict[str, Award] = {}
 

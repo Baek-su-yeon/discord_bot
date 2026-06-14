@@ -36,3 +36,6 @@ RUN_MINUTE = 0
 
 # 상태 파일 경로
 STATE_FILE = "state.json"
+
+# 세션 로그 파일 경로 (음성/화면공유 세션). 개인정보이므로 .gitignore 등록 필수.
+SESSION_FILE = "sessions.json"

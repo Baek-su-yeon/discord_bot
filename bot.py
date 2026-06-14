@@ -18,7 +18,15 @@ from config import (
 )
 from fetch import fetch_month_data
 from render import build_embed
-from state import load_state, save_state
+from state import (
+    add_session_end,
+    add_session_start,
+    load_sessions,
+    load_state,
+    save_sessions,
+    save_state,
+    sessions_to_voice,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("attendance_bot")
@@ -26,7 +34,12 @@ logger = logging.getLogger("attendance_bot")
 # 포럼 스레드 최대 자동 보관 시간(분) = 7일. 집계 게시물이 자동 보관되지 않도록 최대값 사용.
 SUMMARY_POST_AUTO_ARCHIVE = 10080
 
+# message_content: 입퇴실 댓글의 "입실"/"퇴실" 문자열 판별에 필요.
+# Discord Developer Portal > Bot > Privileged Gateway Intents 에서
+# "MESSAGE CONTENT INTENT"도 함께 켜야 한다(봇 100서버 미만이면 심사 없이 토글 가능).
+# 음성 상태(on_voice_state_update)와 self_stream은 Intents.default()에 이미 포함된다.
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 
 _startup_done = False
@@ -78,7 +91,8 @@ async def run_aggregation() -> None:
     logger.info("집계 시작: %s년 %s월 (오늘: %s)", today.year, today.month, today)
 
     raw = await fetch_month_data(channel, today.year, today.month)
-    result = aggregate(raw, today)
+    voice = sessions_to_voice(load_sessions(), TIMEZONE)
+    result = aggregate(raw, today, voice)
 
     embed = build_embed(result, today)
 
@@ -106,6 +120,54 @@ async def daily_aggregation_error(error: BaseException) -> None:
     logger.exception("daily_aggregation 루프에서 처리되지 않은 오류 발생", exc_info=error)
     if not daily_aggregation.is_running():
         daily_aggregation.restart()
+
+
+@client.event
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+) -> None:
+    """음성 입장/퇴장 및 화면공유 변화를 sessions.json에 즉시 기록.
+
+    - 입장(채널 None -> 채널): voice 세션 시작.
+    - 퇴장(채널 -> None): voice 세션 종료(+ 공유 중이었으면 stream도 종료).
+    - 채널 이동(A -> B): voice 체류는 끊기지 않으므로 기록 변화 없음.
+    - 화면공유 시작/종료: stream 세션 시작/종료.
+    """
+    try:
+        now = dt.datetime.now(TIMEZONE)
+        ts = int(now.timestamp())
+        day_key = now.date().isoformat()
+        uid = member.id
+
+        was_in = before.channel is not None
+        now_in = after.channel is not None
+
+        sessions = load_sessions()
+        changed = False
+
+        if now_in and not was_in:
+            add_session_start(sessions, day_key, uid, "voice", ts)
+            changed = True
+        elif was_in and not now_in:
+            add_session_end(sessions, day_key, uid, "voice", ts)
+            if before.self_stream:
+                add_session_end(sessions, day_key, uid, "stream", ts)
+            changed = True
+
+        # 화면공유 상태 변화 (퇴장으로 인한 종료는 위에서 이미 처리)
+        if after.self_stream and not before.self_stream:
+            add_session_start(sessions, day_key, uid, "stream", ts)
+            changed = True
+        elif before.self_stream and not after.self_stream and now_in:
+            add_session_end(sessions, day_key, uid, "stream", ts)
+            changed = True
+
+        if changed:
+            save_sessions(sessions)
+    except Exception:
+        logger.exception("음성 상태 처리 중 오류가 발생했습니다.")
 
 
 @client.event

@@ -200,3 +200,87 @@ def test_attendance_post_with_no_comments():
     assert result.dates == [date(2026, 6, 1)]
     assert result.roster == {}
     assert result.awards["perfect_attendance"].users == []
+
+
+def test_comment_trailing_checkin_dropped_when_pairs_exist():
+    # 완성 페어가 있는데 마지막 입실이 짝(퇴실) 없이 끝나면 그 세션은 버림
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {
+                1: att(
+                    "alice",
+                    (dt(2026, 6, 1, 9, 0), "in"),
+                    (dt(2026, 6, 1, 12, 0), "out"),
+                    (dt(2026, 6, 1, 13, 0), "in"),  # 짝 없음 -> 버림 (가상퇴실 미적용)
+                )
+            }
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    # (09-12)=180분 - 60분(식사) = 120분. 마지막 13:00 입실은 버려짐.
+    assert result.study_minutes[1] == 120
+
+
+# --- 음성 우선 / 폴백 (voice 입력) ---
+
+
+def test_voice_takes_priority_over_comment():
+    # 음성 세션이 유효하면 댓글은 무시되고 음성만 사용 (식사 차감 없음)
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out"))}
+        },
+    )
+    voice = {date(2026, 6, 1): {1: [(dt(2026, 6, 1, 10, 0), dt(2026, 6, 1, 15, 0))]}}
+    result = aggregate(raw, today=date(2026, 6, 1), voice=voice)
+
+    # 음성 10:00-15:00 = 300분 (식사 차감 없음). 댓글 기반 480분은 무시.
+    assert result.study_minutes[1] == 300
+
+
+def test_voice_multi_session_sum():
+    raw = RawData(
+        attendance={date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"))}},
+    )
+    voice = {
+        date(2026, 6, 1): {
+            1: [
+                (dt(2026, 6, 1, 9, 0), dt(2026, 6, 1, 12, 0)),  # 180분
+                (dt(2026, 6, 1, 13, 0), dt(2026, 6, 1, 17, 0)),  # 240분
+            ]
+        }
+    }
+    result = aggregate(raw, today=date(2026, 6, 1), voice=voice)
+
+    assert result.study_minutes[1] == 420
+
+
+def test_voice_null_end_falls_back_to_comment():
+    # 종료 None(유실) 세션이 있으면 음성 소스를 폐기하고 댓글 폴백
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out"))}
+        },
+    )
+    voice = {date(2026, 6, 1): {1: [(dt(2026, 6, 1, 10, 0), None)]}}
+    result = aggregate(raw, today=date(2026, 6, 1), voice=voice)
+
+    # 음성 폐기 -> 댓글 폴백 09:00-18:00 = 540분 - 60분 = 480분
+    assert result.study_minutes[1] == 480
+
+
+def test_voice_clamped_to_0900_and_midnight():
+    # 09:00 이전 시작은 09:00부터, 자정 넘긴 세션은 자정에서 끊는다
+    raw = RawData(
+        attendance={date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"))}},
+    )
+    voice = {
+        date(2026, 6, 1): {
+            1: [(dt(2026, 6, 1, 7, 0), dt(2026, 6, 2, 1, 0))]  # 07:00 ~ 다음날 01:00
+        }
+    }
+    result = aggregate(raw, today=date(2026, 6, 1), voice=voice)
+
+    # 09:00 ~ 자정(00:00) = 15시간 = 900분
+    assert result.study_minutes[1] == 900
