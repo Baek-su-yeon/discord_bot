@@ -3,6 +3,8 @@
 import asyncio
 import datetime as dt
 import logging
+import sys
+from logging.handlers import RotatingFileHandler
 
 import discord
 from discord.ext import tasks
@@ -34,8 +36,33 @@ from state import (
     sessions_to_voice,
 )
 
-logging.basicConfig(level=logging.INFO)
+# 로깅: 콘솔 + 파일(bot.log) 동시 출력. RotatingFileHandler로 자동 로테이션.
+# 백그라운드(작업 스케줄러) 실행 시 콘솔이 안 보이므로 bot.log가 유일한 관찰 창구.
+LOG_FILE = "bot.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5MB
+LOG_BACKUP_COUNT = 5
+
+_log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+)
+logging.basicConfig(
+    level=logging.INFO,
+    format=_log_format,
+    handlers=[logging.StreamHandler(), _file_handler],
+)
 logger = logging.getLogger("attendance_bot")
+
+
+def _log_uncaught(exc_type, exc_value, exc_tb) -> None:
+    """미처리 예외 traceback을 로그(콘솔+파일)에 남긴다. Ctrl+C는 기본 동작 유지."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        return
+    logger.critical("처리되지 않은 예외로 종료합니다.", exc_info=(exc_type, exc_value, exc_tb))
+
+
+sys.excepthook = _log_uncaught
 
 # 포럼 스레드 최대 자동 보관 시간(분) = 7일. 집계 게시물이 자동 보관되지 않도록 최대값 사용.
 SUMMARY_POST_AUTO_ARCHIVE = 10080
@@ -392,7 +419,9 @@ async def on_ready() -> None:
 def main() -> None:
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN이 설정되지 않았습니다. .env를 확인하세요.")
-    client.run(DISCORD_TOKEN)
+    # log_handler=None: discord.py 자체 로깅 설정을 끄고, discord 로거가 위에서 구성한
+    # 루트 핸들러(콘솔 + bot.log)로 전파되게 한다.
+    client.run(DISCORD_TOKEN, log_handler=None)
 
 
 if __name__ == "__main__":
