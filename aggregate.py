@@ -220,6 +220,9 @@ def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> Aggr
         entries = raw.attendance.get(dt, {})
         day_voice = voice.get(dt, {})
         for uid in roster:
+            # 입실 댓글이 없는 날은 공부시간 계산 자격이 없음 -> 음성·댓글 모두 미집계
+            if dt not in attended[uid]:
+                continue
             v_sessions = day_voice.get(uid)
             # 음성 세션이 있고, 종료 None(유실)이 하나도 없으면 음성 사용
             if v_sessions and all(end is not None for _, end in v_sessions):

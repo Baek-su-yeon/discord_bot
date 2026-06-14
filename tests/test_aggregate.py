@@ -270,6 +270,21 @@ def test_voice_null_end_falls_back_to_comment():
     assert result.study_minutes[1] == 480
 
 
+def test_voice_present_but_no_checkin_comment_no_study():
+    # 음성 세션이 있어도 그날 입실 댓글이 없으면 공부시간 미집계 (자격 게이트)
+    raw = RawData(
+        attendance={date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 18, 0), "out"))}},  # 퇴실만
+    )
+    voice = {date(2026, 6, 1): {1: [(dt(2026, 6, 1, 9, 0), dt(2026, 6, 1, 18, 0))]}}
+    result = aggregate(raw, today=date(2026, 6, 1), voice=voice)
+
+    # 입실 없음 -> 공부시간 0 (음성 9시간 무시)
+    assert result.study_minutes[1] == 0
+    # 다른 상에는 영향: 입실 없으니 자동 휴가
+    assert result.table[1][date(2026, 6, 1)].vacation is True
+    assert result.awards["vacation_king"].users == [1]
+
+
 def test_voice_clamped_to_0900_and_midnight():
     # 09:00 이전 시작은 09:00부터, 자정 넘긴 세션은 자정에서 끊는다
     raw = RawData(
