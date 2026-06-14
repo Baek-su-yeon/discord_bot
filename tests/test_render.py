@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from aggregate import RawData, aggregate
+from aggregate import AttendanceLog, RawData, aggregate
 from render import _format_hours, build_embed
 
 KST = ZoneInfo("Asia/Seoul")
@@ -9,6 +9,11 @@ KST = ZoneInfo("Asia/Seoul")
 
 def dt(y, m, d, h, mi):
     return datetime(y, m, d, h, mi, tzinfo=KST)
+
+
+def att(name, *events):
+    """AttendanceLog 헬퍼: events = (datetime, "in"/"out") ..."""
+    return AttendanceLog(name=name, events=list(events))
 
 
 def test_format_hours_rounds_and_drops_minutes():
@@ -20,20 +25,19 @@ def test_format_hours_rounds_and_drops_minutes():
 
 def test_build_embed_today_checkins_field():
     raw = RawData(
-        checkin={
+        attendance={
             date(2026, 6, 1): {
-                1: ("alice", dt(2026, 6, 1, 9, 0)),
-                2: ("bob", dt(2026, 6, 1, 8, 30)),
+                1: att("alice", (dt(2026, 6, 1, 9, 30), "in")),
+                2: att("bob", (dt(2026, 6, 1, 9, 0), "in")),
             }
         },
-        checkout={},
     )
     result = aggregate(raw, today=date(2026, 6, 1))
     embed = build_embed(result, date(2026, 6, 1))
 
     field = next(f for f in embed.fields if f.name == "✅ 오늘 출근")
-    # 출근 시각 순으로 정렬
-    assert field.value == "bob (08:30)\nalice (09:00)"
+    # 입실 시각 순으로 정렬
+    assert field.value == "bob (09:00)\nalice (09:30)"
 
 
 def test_build_embed_no_checkins_today():
@@ -47,18 +51,11 @@ def test_build_embed_no_checkins_today():
 
 def test_build_embed_cumulative_hours_sorted_descending():
     raw = RawData(
-        checkin={
+        attendance={
             date(2026, 6, 1): {
-                1: ("alice", dt(2026, 6, 1, 9, 0)),
-                2: ("bob", dt(2026, 6, 1, 9, 0)),
-                3: ("carol", dt(2026, 6, 1, 9, 0)),
-            }
-        },
-        checkout={
-            date(2026, 6, 1): {
-                1: ("alice", dt(2026, 6, 1, 13, 0)),  # 4시간 -1시간 = 3시간
-                2: ("bob", dt(2026, 6, 1, 19, 0)),  # 10시간 -1시간 = 9시간
-                3: ("carol", dt(2026, 6, 1, 16, 0)),  # 7시간 -1시간 = 6시간
+                1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 13, 0), "out")),  # 4h-1h=3h
+                2: att("bob", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 19, 0), "out")),  # 10h-1h=9h
+                3: att("carol", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 16, 0), "out")),  # 7h-1h=6h
             }
         },
     )
@@ -71,8 +68,9 @@ def test_build_embed_cumulative_hours_sorted_descending():
 
 def test_build_embed_does_not_show_awards():
     raw = RawData(
-        checkin={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))}},
-        checkout={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 18, 0))}},
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out"))}
+        },
     )
     result = aggregate(raw, today=date(2026, 6, 1))
     embed = build_embed(result, date(2026, 6, 1))
@@ -83,8 +81,9 @@ def test_build_embed_does_not_show_awards():
 
 def test_build_embed_cumulative_hours_only():
     raw = RawData(
-        checkin={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))}},
-        checkout={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 18, 0))}},
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out"))}
+        },
     )
     result = aggregate(raw, today=date(2026, 6, 1))
     embed = build_embed(result, date(2026, 6, 1))

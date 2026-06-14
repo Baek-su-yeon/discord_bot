@@ -1,29 +1,51 @@
-"""순수 함수: 원자료 -> 출석부/누적시간/수상 결과. 디스코드 의존성 없음."""
+"""순수 함수: 원자료 -> 출석부/누적시간/수상 결과. 디스코드 의존성 없음.
+
+공부시간은 "음성 체류 > 댓글 폴백" 2단계로 계산한다(음성 입력은 축 2에서 추가).
+이 모듈은 입력 자료구조와 댓글 기반(폴백) 계산을 담당한다.
+"""
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
-# 가상 퇴근 시각 (KST) — 공부 시간 계산과 출석부 표시에만 사용
-VIRTUAL_CHECKOUT_TIME = time(21, 0)
+# 가상 퇴실 시각 (KST) — 댓글 폴백에서 퇴실 댓글이 없을 때만 사용. 패널티 성격.
+VIRTUAL_CHECKOUT_TIME = time(18, 0)
 
-# 공부 시간 계산 시 하루마다 빼는 식사 시간
+# 공부 시간 계산 시 하루마다 빼는 식사 시간 (댓글 폴백 전용)
 LUNCH_BREAK_MINUTES = 60
+
+# 집계 대상 시간 범위 시작 (매일 09:00 ~ 자정)
+DAY_START_TIME = time(9, 0)
+
+# 입퇴실 게시물에서 한 유저의 댓글 이벤트: (시각 KST, "in" | "out")
+AttendanceEvent = tuple[datetime, str]
 
 # 유저 한 명의 특정 게시물 내 최초 댓글 정보: (표시 이름, 댓글 시각 KST)
 UserEntry = tuple[str, datetime]
 
-# 게시물 타입별 데이터: 게시물 날짜 -> {유저ID: UserEntry}
-# 날짜 키가 존재한다는 것 자체가 "그날 해당 타입의 게시물이 있었다"는 뜻.
+# 게시물 타입별 데이터: 게시물 날짜 -> {유저ID: UserEntry} (운동 등 최초댓글 기반)
 TypeData = dict[date, dict[int, UserEntry]]
+
+
+@dataclass
+class AttendanceLog:
+    """입퇴실 게시물에서 한 유저의 댓글 로그: 표시 이름 + 시간순 입실/퇴실 이벤트."""
+
+    name: str
+    events: list[AttendanceEvent] = field(default_factory=list)
+
+
+# 입퇴실 게시물 데이터: 게시물 날짜 -> {유저ID: AttendanceLog}
+# 날짜 키 존재 = "그날 입퇴실 게시물이 있었다"는 뜻.
+AttendanceData = dict[date, dict[int, AttendanceLog]]
 
 
 @dataclass
 class RawData:
     """fetch.py가 만들어주는 이번 달 원자료."""
 
-    checkin: TypeData = field(default_factory=dict)
-    checkout: TypeData = field(default_factory=dict)
-    vacation: TypeData = field(default_factory=dict)
+    # 입퇴실 게시물(입실/퇴실 댓글 시퀀스)
+    attendance: AttendanceData = field(default_factory=dict)
+    # 운동 게시물(유저별 최초 댓글)
     exercise: TypeData = field(default_factory=dict)
 
 
@@ -47,88 +69,123 @@ class Award:
 
 @dataclass
 class AggregateResult:
-    dates: list[date]  # D
+    dates: list[date]  # D = 입퇴실 게시물이 존재하는 날 (오늘까지)
     weekday_dates: list[date]  # Dw
     roster: dict[int, str]  # user_id -> display_name
     table: dict[int, dict[date, Cell]]  # user_id -> {date: Cell} (D 날짜만)
-    study_minutes: dict[int, int]  # user_id -> 총 공부 시간(분, 식사시간 차감)
+    study_minutes: dict[int, int]  # user_id -> 총 공부 시간(분)
     awards: dict[str, Award]
-    today_checkins: dict[int, UserEntry]  # user_id -> (display_name, 오늘 출근 댓글 시각)
+    today_checkins: dict[int, UserEntry]  # user_id -> (display_name, 오늘 첫 입실 시각)
+
+
+def _pair_sessions(
+    events: list[AttendanceEvent],
+) -> tuple[list[tuple[datetime, datetime]], datetime | None]:
+    """시간순 (시각, "in"/"out") 이벤트를 입실→퇴실 페어로 묶는다.
+
+    - 시간순 정렬 후 입실 다음 퇴실과 페어링, 반복.
+    - 퇴실이 입실보다 먼저 나오면 그 퇴실은 무시.
+    - 입실 중 추가 입실은 무시(이미 입실 상태).
+    반환: (완성된 (입실, 퇴실) 페어 목록, 짝 없는 마지막 입실 시각 또는 None)
+    """
+    pairs: list[tuple[datetime, datetime]] = []
+    pending: datetime | None = None
+    for t, kind in sorted(events, key=lambda e: e[0]):
+        if kind == "in":
+            if pending is None:
+                pending = t
+        else:  # "out"
+            if pending is not None:
+                pairs.append((pending, t))
+                pending = None
+    return pairs, pending
+
+
+def _comment_study_minutes(events: list[AttendanceEvent], day: date) -> int:
+    """댓글 폴백 공부시간(분): 다중 세션 합산 - 식사 60분, 가상퇴실 18:00, 음수 0 클램프."""
+    pairs, dangling = _pair_sessions(events)
+
+    total = timedelta()
+    for start, end in pairs:
+        if end > start:
+            total += end - start
+
+    # 마지막 입실이 짝 없이 끝나면 가상 퇴실 18:00 으로 간주 (패널티)
+    if dangling is not None:
+        virtual_end = datetime.combine(day, VIRTUAL_CHECKOUT_TIME, tzinfo=dangling.tzinfo)
+        if virtual_end > dangling:
+            total += virtual_end - dangling
+
+    if total <= timedelta():
+        return 0
+
+    total -= timedelta(minutes=LUNCH_BREAK_MINUTES)
+    return max(0, int(total.total_seconds() // 60))
+
+
+def _first_checkin(events: list[AttendanceEvent]) -> datetime | None:
+    """이벤트 중 가장 이른 입실 시각. 입실이 없으면 None."""
+    checkins = [t for t, kind in events if kind == "in"]
+    return min(checkins) if checkins else None
+
+
+def _last_checkout(events: list[AttendanceEvent]) -> datetime | None:
+    """이벤트 중 가장 늦은 퇴실 시각. 퇴실이 없으면 None."""
+    checkouts = [t for t, kind in events if kind == "out"]
+    return max(checkouts) if checkouts else None
 
 
 def aggregate(raw: RawData, today: date) -> AggregateResult:
     """이번 달 원자료를 받아 출석부/누적시간/수상 결과를 계산한다."""
 
-    # D = 출근 게시물과 퇴근 게시물이 모두 존재하는 날 (오늘까지)
-    d = sorted(set(raw.checkin) & set(raw.checkout))
-    d = [dt for dt in d if dt <= today]
+    # D = 입퇴실 게시물이 존재하는 날 (오늘까지)
+    d = sorted(dt for dt in raw.attendance if dt <= today)
     dw = [dt for dt in d if dt.weekday() < 5]  # 평일만 (월=0 ... 금=4)
+    dw_set = set(dw)
 
-    # 충돌 처리: 같은 날 휴가 + 출근을 둘 다 단 경우 출근 우선, 휴가 무시
-    vacation: TypeData = {}
-    for dt, entries in raw.vacation.items():
-        checkin_users = raw.checkin.get(dt, {})
-        vacation[dt] = {uid: val for uid, val in entries.items() if uid not in checkin_users}
-
-    # 참여자(roster) = 이번 달에 출근/퇴근/휴가/운동 중 하나라도 댓글을 단 유저 전체
+    # 참여자(roster) = 이번 달에 입퇴실/운동 중 하나라도 댓글을 단 유저 전체
     roster: dict[int, str] = {}
-    for type_data in (raw.checkin, raw.checkout, vacation, raw.exercise):
-        for entries in type_data.values():
-            for uid, (name, _) in entries.items():
-                roster[uid] = name
+    for entries in raw.attendance.values():
+        for uid, log in entries.items():
+            roster[uid] = log.name
+    for entries in raw.exercise.values():
+        for uid, (name, _) in entries.items():
+            roster.setdefault(uid, name)
 
-    # 출석부 표 (D 날짜만, 참여자만)
-    table: dict[int, dict[date, Cell]] = {uid: {} for uid in roster}
-    for dt in d:
-        checkins = raw.checkin.get(dt, {})
-        checkouts = raw.checkout.get(dt, {})
-        vacs = vacation.get(dt, {})
-        for uid in roster:
-            cell = Cell()
-            if uid in vacs:
-                cell.vacation = True
-            else:
-                if uid in checkins:
-                    cell.checkin = checkins[uid][1]
-                if uid in checkouts:
-                    cell.checkout = checkouts[uid][1]
-                elif cell.checkin is not None:
-                    cell.virtual_checkout = True
-            if cell.checkin is not None or cell.checkout is not None or cell.vacation:
-                table[uid][dt] = cell
-
-    # 인증 완료(attended): D의 각 날, 출근 댓글 AND 퇴근 댓글(가상 제외)
+    # 출근 인정(attended): D의 각 날, 입실 댓글이 하나라도 있는 유저
     attended: dict[int, set[date]] = {uid: set() for uid in roster}
     for dt in d:
-        checkins = raw.checkin.get(dt, {})
-        checkouts = raw.checkout.get(dt, {})
-        for uid in roster:
-            if uid in checkins and uid in checkouts:
+        entries = raw.attendance.get(dt, {})
+        for uid, log in entries.items():
+            if _first_checkin(log.events) is not None:
                 attended[uid].add(dt)
 
-    # 공부 시간: 출근/퇴근 게시물이 있는 모든 날(오늘까지, 주말 포함) 합산
-    all_dates = sorted(set(raw.checkin) | set(raw.checkout))
-    all_dates = [dt for dt in all_dates if dt <= today]
-    study_minutes: dict[int, int] = {uid: 0 for uid in roster}
-    for dt in all_dates:
-        checkins = raw.checkin.get(dt, {})
-        checkouts = raw.checkout.get(dt, {})
+    # 출석부 표 (D 날짜만, 참여자만). 입실 없으면 자동 휴가.
+    table: dict[int, dict[date, Cell]] = {uid: {} for uid in roster}
+    for dt in d:
+        entries = raw.attendance.get(dt, {})
         for uid in roster:
-            checkin_entry = checkins.get(uid)
-            checkout_entry = checkouts.get(uid)
-            checkin_time = checkin_entry[1] if checkin_entry else None
-            checkout_time = checkout_entry[1] if checkout_entry else None
-
-            if checkin_time and checkout_time:
-                delta = checkout_time - checkin_time - timedelta(minutes=LUNCH_BREAK_MINUTES)
-            elif checkin_time and not checkout_time:
-                virtual_end = datetime.combine(dt, VIRTUAL_CHECKOUT_TIME, tzinfo=checkin_time.tzinfo)
-                delta = virtual_end - checkin_time - timedelta(minutes=LUNCH_BREAK_MINUTES)
+            log = entries.get(uid)
+            cell = Cell()
+            checkin = _first_checkin(log.events) if log else None
+            if checkin is not None:
+                cell.checkin = checkin
+                checkout = _last_checkout(log.events)
+                if checkout is not None:
+                    cell.checkout = checkout
+                else:
+                    cell.virtual_checkout = True
             else:
-                delta = timedelta(0)
+                cell.vacation = True  # 입실 없음 -> 사유 불문 자동 휴가
+            if cell.checkin is not None or cell.vacation:
+                table[uid][dt] = cell
 
-            minutes = max(0, int(delta.total_seconds() // 60))
-            study_minutes[uid] += minutes
+    # 공부 시간: 입퇴실 게시물이 있는 모든 날(오늘까지, 주말 포함) 댓글 폴백 합산
+    study_minutes: dict[int, int] = {uid: 0 for uid in roster}
+    for dt in d:
+        entries = raw.attendance.get(dt, {})
+        for uid, log in entries.items():
+            study_minutes[uid] += _comment_study_minutes(log.events, dt)
 
     awards: dict[str, Award] = {}
 
@@ -137,7 +194,6 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
     awards["perfect_attendance"] = Award(users=perfect_users, value=len(d))
 
     # 출근왕: Dw 중 attended == True 인 날 수 최대
-    dw_set = set(dw)
     attendance_counts = {uid: len(attended[uid] & dw_set) for uid in roster}
     max_attendance = max(attendance_counts.values(), default=0)
     awards["attendance_king"] = Award(
@@ -152,18 +208,15 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
         value=max_study,
     )
 
-    # 휴가왕: 휴가 게시물에 댓글을 단 날 수 최대 (충돌 처리 반영)
-    vacation_counts = {uid: 0 for uid in roster}
-    for entries in vacation.values():
-        for uid in entries:
-            vacation_counts[uid] += 1
+    # 휴가왕: D 중 입실 안 한 날 수 최대 (자동 휴가 포함)
+    vacation_counts = {uid: len(d) - len(attended[uid] & set(d)) for uid in roster}
     max_vacation = max(vacation_counts.values(), default=0)
     awards["vacation_king"] = Award(
         users=[uid for uid, c in vacation_counts.items() if c == max_vacation and max_vacation > 0],
         value=max_vacation,
     )
 
-    # 운동왕: 운동 게시물에 댓글을 단 날 수 최대 (하루 1회)
+    # 운동왕: 운동 게시물에 댓글을 단 날 수 최대 (현행 유지)
     exercise_counts = {uid: 0 for uid in roster}
     for entries in raw.exercise.values():
         for uid in entries:
@@ -174,8 +227,12 @@ def aggregate(raw: RawData, today: date) -> AggregateResult:
         value=max_exercise,
     )
 
-    # 오늘 출근: 오늘 출근 게시물에 댓글을 단 유저
-    today_checkins: dict[int, UserEntry] = dict(raw.checkin.get(today, {}))
+    # 오늘 출근: 오늘 입퇴실 게시물에 입실 댓글을 단 유저 (첫 입실 시각)
+    today_checkins: dict[int, UserEntry] = {}
+    for uid, log in raw.attendance.get(today, {}).items():
+        checkin = _first_checkin(log.events)
+        if checkin is not None:
+            today_checkins[uid] = (log.name, checkin)
 
     return AggregateResult(
         dates=d,

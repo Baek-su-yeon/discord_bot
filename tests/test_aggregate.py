@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from aggregate import RawData, aggregate
+from aggregate import AttendanceLog, RawData, aggregate
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -10,46 +10,156 @@ def dt(y, m, d, h, mi):
     return datetime(y, m, d, h, mi, tzinfo=KST)
 
 
-def test_basic_attendance_and_study_time():
+def att(name, *events):
+    """AttendanceLog 헬퍼: events = (datetime, "in"/"out") ..."""
+    return AttendanceLog(name=name, events=list(events))
+
+
+# --- 댓글 폴백 공부시간 (음성 입력은 축 2에서 추가) ---
+
+
+def test_basic_comment_study_time_and_attendance():
     # 2026-06-01 (월), 2026-06-02 (화)
     raw = RawData(
-        checkin={
-            date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))},
-            date(2026, 6, 2): {1: ("alice", dt(2026, 6, 2, 9, 0))},
-        },
-        checkout={
-            date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 18, 0))},
-            # 6/2 퇴근 게시물 없음 -> D에서 제외
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out"))},
+            # 6/2: 퇴실 댓글 없음 -> 가상 퇴실 18:00
+            date(2026, 6, 2): {1: att("alice", (dt(2026, 6, 2, 9, 0), "in"))},
         },
     )
     result = aggregate(raw, today=date(2026, 6, 2))
 
-    assert result.dates == [date(2026, 6, 1)]
-    assert result.weekday_dates == [date(2026, 6, 1)]
+    assert result.dates == [date(2026, 6, 1), date(2026, 6, 2)]
+    assert result.weekday_dates == [date(2026, 6, 1), date(2026, 6, 2)]
     assert result.roster == {1: "alice"}
 
-    # 6/1: 09:00-18:00 = 540분 - 식사시간 60분 = 480분
-    # 6/2: 출근만 -> 가상 퇴근 21:00 = 720분 - 식사시간 60분 = 660분
-    assert result.study_minutes[1] == 480 + 660
+    # 6/1: 09:00-18:00 = 540분 - 60분 = 480분
+    # 6/2: 입실만 -> 가상 퇴실 18:00 = 540분 - 60분 = 480분
+    assert result.study_minutes[1] == 480 + 480
 
     assert result.awards["perfect_attendance"].users == [1]
     assert result.awards["attendance_king"].users == [1]
-    assert result.awards["attendance_king"].value == 1
+    assert result.awards["attendance_king"].value == 2
 
-    # 오늘(6/2) 출근한 사람
     assert result.today_checkins == {1: ("alice", dt(2026, 6, 2, 9, 0))}
+
+
+def test_multi_session_sum():
+    # 입실 -> 퇴실 -> 입실 -> 퇴실 = 각 세션 합산
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {
+                1: att(
+                    "alice",
+                    (dt(2026, 6, 1, 9, 0), "in"),
+                    (dt(2026, 6, 1, 12, 0), "out"),
+                    (dt(2026, 6, 1, 13, 0), "in"),
+                    (dt(2026, 6, 1, 18, 0), "out"),
+                )
+            }
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    # (09-12)=180 + (13-18)=300 = 480분 - 60분(식사) = 420분
+    assert result.study_minutes[1] == 420
+
+
+def test_virtual_checkout_18_when_no_checkout():
+    raw = RawData(
+        attendance={date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"))}},
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    # 가상 퇴실 18:00 -> 540분 - 60분 = 480분
+    assert result.study_minutes[1] == 480
+    cell = result.table[1][date(2026, 6, 1)]
+    assert cell.checkin == dt(2026, 6, 1, 9, 0)
+    assert cell.virtual_checkout is True
+    assert cell.vacation is False
+
+
+def test_out_before_in_is_ignored():
+    # 퇴실이 입실보다 먼저 나오면 그 퇴실은 무시
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {
+                1: att(
+                    "alice",
+                    (dt(2026, 6, 1, 10, 0), "out"),
+                    (dt(2026, 6, 1, 11, 0), "in"),
+                    (dt(2026, 6, 1, 18, 0), "out"),
+                )
+            }
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    # (11-18)=420분 - 60분 = 360분
+    assert result.study_minutes[1] == 360
+
+
+def test_lunch_break_clamped_to_zero_for_short_day():
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 9, 30), "out"))}
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    # 30분 - 60분 = 음수 -> 0 클램프
+    assert result.study_minutes[1] == 0
+
+
+# --- 자동 휴가 / 수상 ---
+
+
+def test_auto_vacation_and_vacation_king():
+    # bob은 6/2에 입실 댓글이 없음 -> 자동 휴가
+    raw = RawData(
+        attendance={
+            date(2026, 6, 1): {
+                1: att("alice", (dt(2026, 6, 1, 9, 0), "in"), (dt(2026, 6, 1, 18, 0), "out")),
+                2: att("bob", (dt(2026, 6, 1, 10, 0), "in"), (dt(2026, 6, 1, 18, 0), "out")),
+            },
+            date(2026, 6, 2): {
+                1: att("alice", (dt(2026, 6, 2, 9, 0), "in"), (dt(2026, 6, 2, 18, 0), "out")),
+            },
+        },
+    )
+    result = aggregate(raw, today=date(2026, 6, 2))
+
+    # alice는 매일 입실 -> 개근, 휴가 0일
+    assert result.awards["perfect_attendance"].users == [1]
+    assert result.table[1][date(2026, 6, 1)].vacation is False
+    # bob은 6/2 입실 없음 -> 자동 휴가 1일 -> 휴가왕
+    assert result.table[2][date(2026, 6, 2)].vacation is True
+    assert result.awards["vacation_king"].users == [2]
+    assert result.awards["vacation_king"].value == 1
+
+
+def test_checkout_only_no_study_and_auto_vacation():
+    # 퇴실 댓글만 있고 입실 없음 -> 공부시간 0, 자동 휴가
+    raw = RawData(
+        attendance={date(2026, 6, 1): {1: att("alice", (dt(2026, 6, 1, 18, 0), "out"))}},
+    )
+    result = aggregate(raw, today=date(2026, 6, 1))
+
+    assert result.study_minutes[1] == 0
+    assert result.table[1][date(2026, 6, 1)].vacation is True
+    assert result.awards["perfect_attendance"].users == []
+    assert result.awards["vacation_king"].users == [1]
 
 
 def test_weekend_excluded_from_attendance_king_but_perfect_needs_all_days():
     # 2026-06-06 (토), 2026-06-08 (월)
     raw = RawData(
-        checkin={
-            date(2026, 6, 6): {1: ("alice", dt(2026, 6, 6, 9, 0))},
-            date(2026, 6, 8): {1: ("alice", dt(2026, 6, 8, 9, 0)), 2: ("bob", dt(2026, 6, 8, 9, 0))},
-        },
-        checkout={
-            date(2026, 6, 6): {1: ("alice", dt(2026, 6, 6, 18, 0))},
-            date(2026, 6, 8): {1: ("alice", dt(2026, 6, 8, 18, 0)), 2: ("bob", dt(2026, 6, 8, 18, 0))},
+        attendance={
+            date(2026, 6, 6): {1: att("alice", (dt(2026, 6, 6, 9, 0), "in"), (dt(2026, 6, 6, 18, 0), "out"))},
+            date(2026, 6, 8): {
+                1: att("alice", (dt(2026, 6, 8, 9, 0), "in"), (dt(2026, 6, 8, 18, 0), "out")),
+                2: att("bob", (dt(2026, 6, 8, 9, 0), "in"), (dt(2026, 6, 8, 18, 0), "out")),
+            },
         },
     )
     result = aggregate(raw, today=date(2026, 6, 8))
@@ -57,60 +167,36 @@ def test_weekend_excluded_from_attendance_king_but_perfect_needs_all_days():
     assert result.dates == [date(2026, 6, 6), date(2026, 6, 8)]
     assert result.weekday_dates == [date(2026, 6, 8)]
 
-    # alice: 토/월 모두 attended -> 개근
+    # alice: 토/월 모두 입실 -> 개근
     assert set(result.awards["perfect_attendance"].users) == {1}
-    # 출근왕은 평일(Dw)만 카운트 -> 6/8 둘 다 attended -> 공동 출근왕
+    # 출근왕은 평일(Dw)만 카운트 -> 6/8 둘 다 입실 -> 공동 출근왕
     assert set(result.awards["attendance_king"].users) == {1, 2}
     assert result.awards["attendance_king"].value == 1
 
 
-def test_vacation_checkin_conflict_checkin_wins():
-    raw = RawData(
-        checkin={
-            date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))},
-        },
-        checkout={
-            date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 18, 0))},
-        },
-        vacation={
-            date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 8, 0))},
-        },
-    )
-    result = aggregate(raw, today=date(2026, 6, 1))
-
-    # 휴가 무시 -> 출근왕 후보 (개근상도 D가 1일이라 충족)
-    assert result.awards["vacation_king"].users == []
-    assert result.table[1][date(2026, 6, 1)].vacation is False
-    assert result.table[1][date(2026, 6, 1)].checkin == dt(2026, 6, 1, 9, 0)
+# --- 빈 데이터 방어 ---
 
 
-def test_checkout_without_checkin_zero_study_time():
-    raw = RawData(
-        checkin={date(2026, 6, 1): {}},
-        checkout={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 18, 0))}},
-    )
-    result = aggregate(raw, today=date(2026, 6, 1))
-
-    assert result.study_minutes[1] == 0
-    assert result.awards["perfect_attendance"].users == []
-
-
-def test_no_dates_yet_no_perfect_attendance():
+def test_empty_data_no_errors():
     raw = RawData()
     result = aggregate(raw, today=date(2026, 6, 1))
 
     assert result.dates == []
+    assert result.roster == {}
+    assert result.study_minutes == {}
     assert result.awards["perfect_attendance"].users == []
     assert result.awards["attendance_king"].users == []
+    assert result.awards["study_king"].users == []
+    assert result.awards["vacation_king"].users == []
+    assert result.awards["exercise_king"].users == []
     assert result.today_checkins == {}
 
 
-def test_lunch_break_clamped_to_zero_for_short_day():
-    # 출근-퇴근이 1시간 이내면 식사시간을 빼고 0으로 클램프
-    raw = RawData(
-        checkin={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 0))}},
-        checkout={date(2026, 6, 1): {1: ("alice", dt(2026, 6, 1, 9, 30))}},
-    )
+def test_attendance_post_with_no_comments():
+    # 게시물은 있으나 댓글 0개 -> D에는 포함, 참여자/수상 없음
+    raw = RawData(attendance={date(2026, 6, 1): {}})
     result = aggregate(raw, today=date(2026, 6, 1))
 
-    assert result.study_minutes[1] == 0
+    assert result.dates == [date(2026, 6, 1)]
+    assert result.roster == {}
+    assert result.awards["perfect_attendance"].users == []
