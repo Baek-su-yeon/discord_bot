@@ -19,6 +19,19 @@ from datetime import date, datetime, tzinfo
 from config import SESSION_FILE, STATE_FILE
 
 
+def _atomic_write_json(path: str, data: dict) -> None:
+    """임시 파일(.tmp)에 json.dump 후 os.replace로 교체하는 원자적 쓰기.
+
+    쓰기 도중 봇이 죽어도 기존 파일이 깨지지 않는다(같은 디렉터리의 .tmp -> os.replace).
+    """
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 # --- 집계 게시물 ID (state.json) ---
 
 
@@ -31,9 +44,8 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    """state dict를 state.json에 저장."""
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+    """state dict를 state.json에 원자적으로 저장."""
+    _atomic_write_json(STATE_FILE, state)
 
 
 # --- 세션 로그 (sessions.json) ---
@@ -48,9 +60,8 @@ def load_sessions() -> dict:
 
 
 def save_sessions(sessions: dict) -> None:
-    """sessions dict를 sessions.json에 저장."""
-    with open(SESSION_FILE, "w", encoding="utf-8") as f:
-        json.dump(sessions, f, ensure_ascii=False, indent=2)
+    """sessions dict를 sessions.json에 원자적으로 저장."""
+    _atomic_write_json(SESSION_FILE, sessions)
 
 
 def add_session_start(sessions: dict, day_key: str, user_id: int, kind: str, ts: int) -> None:
