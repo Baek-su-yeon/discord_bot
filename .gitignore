@@ -232,6 +232,8 @@ $RECYCLE.BIN/
 
 # file name
 state.json
+sessions.json
+.env
 
 # folder
 docs/
