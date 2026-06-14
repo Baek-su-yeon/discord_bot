@@ -30,9 +30,13 @@ KEYWORD_CHECK_OUT = "퇴실"
 # 타임존
 TIMEZONE = ZoneInfo("Asia/Seoul")
 
-# 매일 집계 실행 시각 (KST)
-RUN_HOUR = 21
-RUN_MINUTE = 0
+# 집계 계산 시각 (KST): 매일 자정. 전날(09:00~자정) 데이터를 확정 집계.
+AGGREGATE_HOUR = 0
+AGGREGATE_MINUTE = 0
+
+# 게시물 생성/게시 시각 (KST): 매일 09:00. 입퇴실 -> 휴가 -> 집계 결과 순.
+POST_HOUR = 9
+POST_MINUTE = 0
 
 # 상태 파일 경로
 STATE_FILE = "state.json"
