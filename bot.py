@@ -1,5 +1,6 @@
-"""main: 봇 기동, 스케줄(자정 집계 / 09:00 게시), 음성 이벤트, 모듈 연결."""
+"""main: 봇 기동, 스케줄(자정 집계 / 09:00 게시), 음성 이벤트, 화면공유 알림, 모듈 연결."""
 
+import asyncio
 import datetime as dt
 import logging
 
@@ -39,6 +40,12 @@ logger = logging.getLogger("attendance_bot")
 # 포럼 스레드 최대 자동 보관 시간(분) = 7일. 집계 게시물이 자동 보관되지 않도록 최대값 사용.
 SUMMARY_POST_AUTO_ARCHIVE = 10080
 
+# 화면공유 알림: 음성 입장(또는 공유 종료) 후 이 시간만큼 공유가 없으면 알림. 켤 때까지 반복.
+STREAM_ALERT_INTERVAL_SECONDS = 3600  # 1시간
+# 알림 발송 허용 시간대 (KST): 09:00 이상 18:00 미만. 18:00 이후엔 발송하지 않음.
+ALERT_WINDOW_START_HOUR = 9
+ALERT_WINDOW_END_HOUR = 18
+
 # message_content: 입퇴실 댓글의 "입실"/"퇴실" 문자열 판별에 필요.
 # Discord Developer Portal > Bot > Privileged Gateway Intents 에서
 # "MESSAGE CONTENT INTENT"도 함께 켜야 한다(봇 100서버 미만이면 심사 없이 토글 가능).
@@ -48,6 +55,52 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 _startup_done = False
+
+# 화면공유 알림 타이머 (메모리 전용, 영구 저장 안 함). user_id -> asyncio.Task
+_stream_alert_tasks: dict[int, asyncio.Task] = {}
+
+
+def _within_alert_window(now: dt.datetime) -> bool:
+    """알림 발송 허용 시간대(09:00~18:00) 여부."""
+    return ALERT_WINDOW_START_HOUR <= now.hour < ALERT_WINDOW_END_HOUR
+
+
+def _cancel_stream_alert(user_id: int) -> None:
+    """해당 유저의 화면공유 알림 타이머를 해제."""
+    task = _stream_alert_tasks.pop(user_id, None)
+    if task is not None:
+        task.cancel()
+
+
+def _start_stream_alert(member: discord.Member) -> None:
+    """해당 유저의 화면공유 알림 타이머를 (재)시작."""
+    _cancel_stream_alert(member.id)
+    _stream_alert_tasks[member.id] = asyncio.create_task(_stream_alert_loop(member))
+
+
+async def _stream_alert_loop(member: discord.Member) -> None:
+    """1시간마다, 여전히 음성에 있고 공유를 안 켰으면 채널에서 @멘션. 09~18시에만 발송."""
+    try:
+        while True:
+            await asyncio.sleep(STREAM_ALERT_INTERVAL_SECONDS)
+
+            voice = member.voice
+            if voice is None or voice.channel is None:
+                return  # 음성 퇴장 -> 종료
+            if voice.self_stream:
+                return  # 공유 켜짐 -> 종료
+
+            if not _within_alert_window(dt.datetime.now(TIMEZONE)):
+                continue  # 시간대 밖 -> 이번 주기는 발송 생략, 다음 주기 대기
+
+            try:
+                await voice.channel.send(
+                    f"{member.mention} 화면 공유가 꺼져 있어요. 확인해주세요 🙏"
+                )
+            except discord.HTTPException:
+                logger.exception("화면공유 알림 전송 실패")
+    except asyncio.CancelledError:
+        pass
 
 
 async def _get_channel() -> discord.ForumChannel:
@@ -84,6 +137,28 @@ async def create_daily_post(
         applied_tags=_resolve_tags(channel, tag_name),
     )
     logger.info("게시물 생성: %s", title)
+
+
+async def _ensure_daily_post(
+    channel: discord.ForumChannel,
+    state: dict,
+    state_key: str,
+    tag_name: str,
+    title: str,
+    content: str,
+    today_iso: str,
+) -> bool:
+    """오늘 아직 안 만들었으면 일일 게시물을 생성하고 state에 기록. 생성했으면 True.
+
+    봇 재시작/루프 재시작 등으로 09:00 작업이 같은 날 두 번 돌아도 중복 생성하지 않도록
+    state[state_key]에 마지막 생성 날짜를 저장해 가드한다. (post 타입별 개별 가드)
+    """
+    if state.get(state_key) == today_iso:
+        logger.info("오늘 이미 생성됨, 건너뜀: %s", title)
+        return False
+    await create_daily_post(channel, tag_name, title, content)
+    state[state_key] = today_iso
+    return True
 
 
 async def get_or_create_summary_message(channel: discord.ForumChannel) -> discord.Message:
@@ -164,24 +239,32 @@ async def publish_summary(channel: discord.ForumChannel) -> None:
 
 
 async def run_morning_post() -> None:
-    """09:00: 입퇴실 게시물 -> 휴가 게시물 -> 집계 결과 게시물 (이 순서)."""
+    """09:00: 입퇴실 게시물 -> 휴가 게시물 -> 집계 결과 게시물 (이 순서).
+
+    입퇴실/휴가 게시물은 오늘 이미 생성했으면 건너뛴다(중복 생성 가드).
+    집계 결과는 동일 메시지를 수정하는 멱등 동작이라 항상 게시한다.
+    """
     channel = await _get_channel()
     today = dt.datetime.now(TIMEZONE).date()
+    today_iso = today.isoformat()
 
+    state = load_state()
+    created = False
     # 1) 입퇴실 게시물
-    await create_daily_post(
-        channel,
-        TAG_ATTENDANCE,
+    created |= await _ensure_daily_post(
+        channel, state, "last_attendance_post", TAG_ATTENDANCE,
         f"{today.month}월 {today.day}일 입퇴실",
-        "오늘의 입실/퇴실을 댓글로 남겨주세요. (예: 입실, 퇴실)",
+        "오늘의 입실/퇴실을 댓글로 남겨주세요. (예: 입실, 퇴실)", today_iso,
     )
     # 2) 휴가 게시물
-    await create_daily_post(
-        channel,
-        TAG_VACATION,
+    created |= await _ensure_daily_post(
+        channel, state, "last_vacation_post", TAG_VACATION,
         f"{today.month}월 {today.day}일 휴가",
-        "오늘 휴가라면 댓글로 남겨주세요.",
+        "오늘 휴가라면 댓글로 남겨주세요.", today_iso,
     )
+    if created:
+        save_state(state)
+
     # 3) 집계 결과 게시물 (전날 자정에 확정한 결과)
     await publish_summary(channel)
 
@@ -260,6 +343,19 @@ async def on_voice_state_update(
 
         if changed:
             save_sessions(sessions)
+
+        # 화면공유 알림 타이머 관리 (메모리)
+        stream_started = after.self_stream and not before.self_stream
+        stream_stopped = before.self_stream and not after.self_stream
+        joined = now_in and not was_in
+        left = was_in and not now_in
+
+        if left or (stream_started and now_in):
+            # 음성 퇴장 또는 공유 시작 -> 타이머 해제
+            _cancel_stream_alert(uid)
+        elif (joined and not after.self_stream) or (stream_stopped and now_in):
+            # 공유 없이 입장 또는 공유 종료(여전히 음성) -> 1시간 타이머 (재)시작
+            _start_stream_alert(member)
     except Exception:
         logger.exception("음성 상태 처리 중 오류가 발생했습니다.")
 
