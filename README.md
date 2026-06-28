@@ -110,6 +110,24 @@ python bot.py
 
 시작 시 한 번 집계 결과를 갱신(catch-up)한 뒤, 자정 집계·09:00 게시 스케줄을 시작합니다.
 
+### 실행 플래그 — 기능 on/off
+
+인자 없이 실행하면 모든 기능이 켜진 상태로 동작합니다(기존과 동일). 다음 플래그로 개별 기능을 끌 수 있습니다.
+
+```bash
+python bot.py                       # 둘 다 ON (기본)
+python bot.py --no-summary          # 집계 결과 공개 게시만 OFF
+python bot.py --no-stream-alert     # 라이브 미사용 알림만 OFF
+python bot.py --no-summary --no-stream-alert   # 둘 다 OFF
+```
+
+| 플래그 | 효과 |
+|--------|------|
+| `--no-summary` | 매일 09:00에 집계 결과를 **공개 게시물에 갱신하는 동작만 생략**합니다. 입퇴실/휴가 게시물 생성과 집계 계산·보관(`state.json`의 `pending_embed`)은 그대로 유지되므로, 결과는 보관만 되고 공개되지 않습니다(필요 시 `publish_once.py`로 직접 게시 가능). |
+| `--no-stream-alert` | 화면공유(라이브) **1시간 미사용 알림만 비활성화**합니다. 음성/화면공유 세션의 `sessions.json` 기록은 그대로 유지됩니다. |
+
+> 시작 시 로그에 현재 상태를 남깁니다: `기능 상태 — 집계 결과 게시: ON/OFF, 화면공유 알림: ON/OFF`.
+
 ### 보조 스크립트 — `publish_once.py` (집계만 수동 게시)
 
 봇이 **09:00에 꺼져 있어 게시(`run_morning_post`)가 누락된 날**, 보관된 집계 결과

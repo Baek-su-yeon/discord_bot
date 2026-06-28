@@ -1,5 +1,6 @@
 """main: 봇 기동, 스케줄(자정 집계 / 09:00 게시), 음성 이벤트, 화면공유 알림, 모듈 연결."""
 
+import argparse
 import asyncio
 import datetime as dt
 import logging
@@ -83,6 +84,13 @@ client = discord.Client(intents=intents)
 
 _startup_done = False
 
+# 실행 플래그 (main의 argparse에서 설정). 기본값 = 둘 다 활성(인자 없이 실행하면 현행 동작 유지).
+# --no-summary: 09:00 집계 결과 "게시(공개 갱신)"만 생략. 입퇴실/휴가 게시물 생성과
+#   집계 계산·보관(state.json의 pending_embed)은 그대로 유지된다.
+# --no-stream-alert: 화면공유 1시간 미사용 알림만 끈다. 세션 기록은 그대로 유지된다.
+_summary_publish_enabled = True
+_stream_alert_enabled = True
+
 # 화면공유 알림 타이머 (메모리 전용, 영구 저장 안 함). user_id -> asyncio.Task
 _stream_alert_tasks: dict[int, asyncio.Task] = {}
 
@@ -100,7 +108,9 @@ def _cancel_stream_alert(user_id: int) -> None:
 
 
 def _start_stream_alert(member: discord.Member) -> None:
-    """해당 유저의 화면공유 알림 타이머를 (재)시작."""
+    """해당 유저의 화면공유 알림 타이머를 (재)시작. --no-stream-alert면 시작하지 않는다."""
+    if not _stream_alert_enabled:
+        return
     _cancel_stream_alert(member.id)
     _stream_alert_tasks[member.id] = asyncio.create_task(_stream_alert_loop(member))
 
@@ -293,7 +303,11 @@ async def run_morning_post() -> None:
         save_state(state)
 
     # 3) 집계 결과 게시물 (전날 자정에 확정한 결과)
-    await publish_summary(channel)
+    # --no-summary면 공개 게시만 생략. 집계 계산·보관(pending_embed)은 자정/시작 catch-up에서 계속된다.
+    if _summary_publish_enabled:
+        await publish_summary(channel)
+    else:
+        logger.info("집계 결과 게시 비활성화(--no-summary): 공개 게시 생략 (결과는 pending_embed에 보관)")
 
 
 @tasks.loop(time=dt.time(hour=AGGREGATE_HOUR, minute=AGGREGATE_MINUTE, tzinfo=TIMEZONE))
@@ -417,8 +431,33 @@ async def on_ready() -> None:
 
 
 def main() -> None:
+    global _summary_publish_enabled, _stream_alert_enabled
+    parser = argparse.ArgumentParser(
+        description="디스코드 출퇴근 집계 봇. 인자 없이 실행하면 모든 기능이 켜진 채로 동작한다."
+    )
+    parser.add_argument(
+        "--no-summary",
+        action="store_true",
+        help="매일 09:00 집계 결과의 '공개 게시(갱신)'를 끈다. "
+        "입퇴실/휴가 게시물 생성과 집계 계산·보관(state.json의 pending_embed)은 그대로 유지된다.",
+    )
+    parser.add_argument(
+        "--no-stream-alert",
+        action="store_true",
+        help="화면공유(라이브) 1시간 미사용 알림을 끈다. 음성/화면공유 세션 기록은 그대로 유지된다.",
+    )
+    args = parser.parse_args()
+    _summary_publish_enabled = not args.no_summary
+    _stream_alert_enabled = not args.no_stream_alert
+
     if not DISCORD_TOKEN:
         raise RuntimeError("DISCORD_TOKEN이 설정되지 않았습니다. .env를 확인하세요.")
+
+    logger.info(
+        "기능 상태 — 집계 결과 게시: %s, 화면공유 알림: %s",
+        "ON" if _summary_publish_enabled else "OFF",
+        "ON" if _stream_alert_enabled else "OFF",
+    )
     # log_handler=None: discord.py 자체 로깅 설정을 끄고, discord 로거가 위에서 구성한
     # 루트 핸들러(콘솔 + bot.log)로 전파되게 한다.
     client.run(DISCORD_TOKEN, log_handler=None)
