@@ -15,6 +15,8 @@ from config import (
     AGGREGATE_HOUR,
     AGGREGATE_MINUTE,
     ATTENDANCE_CHANNEL_ID,
+    AWARD_EXCLUDED_IDS,
+    AWARD_EXCLUDED_NAMES,
     DISCORD_TOKEN,
     POST_HOUR,
     POST_MINUTE,
@@ -229,7 +231,7 @@ async def _compute_summary_embed(channel: discord.ForumChannel, target_day: dt.d
     """target_day 기준 그달 전체를 집계해 임베드를 만든다(음성 우선 + 댓글 폴백)."""
     raw = await fetch_month_data(channel, target_day.year, target_day.month)
     voice = sessions_to_voice(load_sessions(), TIMEZONE)
-    result = aggregate(raw, target_day, voice)
+    result = aggregate(raw, target_day, voice, AWARD_EXCLUDED_IDS, AWARD_EXCLUDED_NAMES)
     return build_embed(result, target_day)
 
 

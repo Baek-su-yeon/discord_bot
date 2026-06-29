@@ -164,7 +164,13 @@ def _last_checkout(events: list[AttendanceEvent]) -> datetime | None:
     return max(checkouts) if checkouts else None
 
 
-def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> AggregateResult:
+def aggregate(
+    raw: RawData,
+    today: date,
+    voice: VoiceData | None = None,
+    exclude_from_awards: frozenset[int] = frozenset(),
+    exclude_names_from_awards: frozenset[str] = frozenset(),
+) -> AggregateResult:
     """이번 달 원자료를 받아 출석부/누적시간/수상 결과를 계산한다.
 
     공부시간은 음성 체류 우선, 음성이 없거나 유실(종료 None)이면 댓글 폴백.
@@ -184,6 +190,12 @@ def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> Aggr
     for entries in raw.exercise.values():
         for uid, (name, _) in entries.items():
             roster.setdefault(uid, name)
+
+    # 수상 배제 대상: ID 또는 표시 이름이 일치하면 모든 수상에서 제외
+    _no_award = frozenset(
+        uid for uid, name in roster.items()
+        if uid in exclude_from_awards or name in exclude_names_from_awards
+    )
 
     # 출근 인정(attended): D의 각 날, 입실 댓글이 하나라도 있는 유저
     attended: dict[int, set[date]] = {uid: set() for uid in roster}
@@ -235,21 +247,21 @@ def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> Aggr
     awards: dict[str, Award] = {}
 
     # 개근상: D의 모든 날에 attended == True
-    perfect_users = [uid for uid in roster if d and attended[uid] == set(d)]
+    perfect_users = [uid for uid in roster if d and attended[uid] == set(d) and uid not in _no_award]
     awards["perfect_attendance"] = Award(users=perfect_users, value=len(d))
 
     # 출근왕: Dw 중 attended == True 인 날 수 최대
     attendance_counts = {uid: len(attended[uid] & dw_set) for uid in roster}
     max_attendance = max(attendance_counts.values(), default=0)
     awards["attendance_king"] = Award(
-        users=[uid for uid, c in attendance_counts.items() if c == max_attendance and max_attendance > 0],
+        users=[uid for uid, c in attendance_counts.items() if c == max_attendance and max_attendance > 0 and uid not in _no_award],
         value=max_attendance,
     )
 
     # 공부왕: 공부 시간 총합 최대
     max_study = max(study_minutes.values(), default=0)
     awards["study_king"] = Award(
-        users=[uid for uid, m in study_minutes.items() if m == max_study and max_study > 0],
+        users=[uid for uid, m in study_minutes.items() if m == max_study and max_study > 0 and uid not in _no_award],
         value=max_study,
     )
 
@@ -257,7 +269,7 @@ def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> Aggr
     vacation_counts = {uid: len(d) - len(attended[uid] & set(d)) for uid in roster}
     max_vacation = max(vacation_counts.values(), default=0)
     awards["vacation_king"] = Award(
-        users=[uid for uid, c in vacation_counts.items() if c == max_vacation and max_vacation > 0],
+        users=[uid for uid, c in vacation_counts.items() if c == max_vacation and max_vacation > 0 and uid not in _no_award],
         value=max_vacation,
     )
 
@@ -268,7 +280,7 @@ def aggregate(raw: RawData, today: date, voice: VoiceData | None = None) -> Aggr
             exercise_counts[uid] += 1
     max_exercise = max(exercise_counts.values(), default=0)
     awards["exercise_king"] = Award(
-        users=[uid for uid, c in exercise_counts.items() if c == max_exercise and max_exercise > 0],
+        users=[uid for uid, c in exercise_counts.items() if c == max_exercise and max_exercise > 0 and uid not in _no_award],
         value=max_exercise,
     )
 

@@ -43,3 +43,7 @@ STATE_FILE = "state.json"
 
 # 세션 로그 파일 경로 (음성/화면공유 세션). 개인정보이므로 .gitignore 등록 필수.
 SESSION_FILE = "sessions.json"
+
+# 수상 배제 대상 (봇 운영자 등). ID 기준이 주, 이름은 보조.
+AWARD_EXCLUDED_IDS: frozenset[int] = frozenset({1470026075105919008})
+AWARD_EXCLUDED_NAMES: frozenset[str] = frozenset({"벡수연"})
