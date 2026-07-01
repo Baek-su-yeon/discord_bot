@@ -46,4 +46,4 @@ SESSION_FILE = "sessions.json"
 
 # 수상 배제 대상 (봇 운영자 등). ID 기준이 주, 이름은 보조.
 AWARD_EXCLUDED_IDS: frozenset[int] = frozenset({1470026075105919008})
-AWARD_EXCLUDED_NAMES: frozenset[str] = frozenset({"벡수연"})
+AWARD_EXCLUDED_NAMES: frozenset[str] = frozenset({"백수연"})
